@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local environments and secrets
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Local reports and notebook output
+.ipynb_checkpoints/
+*.html
+
+# Generated model artifacts
+*.joblib
+*.pkl
+*.pickle

@@ -148,12 +148,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-import pyarrow.parquet as pq
-
-parquet_file = pq.ParquetFile("data\processed\consumption_2021_2025_features.parquet")
-
-# Read just the first row group / batch instead of the whole file
-batch = next(parquet_file.iter_batches(batch_size=5))
-df = batch.to_pandas()
-print(df)
