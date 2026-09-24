@@ -1,32 +1,29 @@
-"""Evaluate regional seasonal-naive demand forecasts.
+"""Evaluate target-aligned seasonal baselines.
 
-This is the first forecasting benchmark for the project:
-
-    lag 24 hours  -> tomorrow's hourly demand
-    lag 168 hours -> next week's hourly demand
-
-The forecast is made separately for each Danish administrative region after
-aggregating the three consumer categories. 
+Each forecast is made at one UTC midnight per day and predicts the same
+24-hour or 168-hour regional total used by the machine-learning models.
 """
 
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FEATURE_PATH = PROJECT_ROOT / "data" / "processed" / "consumption_2021_2025_features.parquet"
-METRICS_PATH = PROJECT_ROOT / "data" / "processed" / "regional_demand_baseline_metrics.csv"
+METRICS_PATH = PROJECT_ROOT / "data" / "processed" / "regional_baseline_metrics.csv"
+HORIZONS = (24, 168)
 
 
 def smape(actual: pd.Series, forecast: pd.Series) -> float:
-    denominator = (actual.abs() + forecast.abs()).replace(0, pd.NA)
+    denominator = (actual.abs() + forecast.abs()).replace(0, np.nan)
     return float((2 * (actual - forecast).abs() / denominator).mean() * 100)
 
 
 def load_regional_hourly_demand() -> pd.DataFrame:
-    data = pd.read_parquet(FEATURE_PATH, columns=["TimeUTC", "TimeDK", "RegionName", "ConsumptionkWh"])
+    columns = ["TimeUTC", "TimeDK", "RegionName", "ConsumptionkWh"]
+    data = pd.read_parquet(FEATURE_PATH, columns=columns)
     data["TimeUTC"] = pd.to_datetime(data["TimeUTC"])
     data["TimeDK"] = pd.to_datetime(data["TimeDK"])
     return (
@@ -36,72 +33,66 @@ def load_regional_hourly_demand() -> pd.DataFrame:
     )
 
 
-def add_baselines(data: pd.DataFrame) -> pd.DataFrame:
-    grouped = data.groupby("RegionName", sort=False)["ConsumptionkWh"]
-    data = data.copy()
-    data["forecast_tomorrow"] = grouped.shift(24)
-    data["forecast_next_week"] = grouped.shift(168)
-    data["year"] = data["TimeDK"].dt.year
-    return data
+def forecast_total(values: pd.Series, origin: int, horizon: int, lags: tuple[int, ...]) -> float:
+    """Forecast a future total using one or more historical hourly patterns."""
+    array = values.to_numpy() if isinstance(values, pd.Series) else np.asarray(values)
+    offsets = np.arange(1, horizon + 1)[:, None]
+    source_positions = origin + offsets - np.asarray(lags)[None, :]
+    return float(array[source_positions].mean(axis=1).sum())
 
 
-def evaluate(data: pd.DataFrame) -> pd.DataFrame:
+def evaluate(data: pd.DataFrame, years: tuple[int, ...] = (2024, 2025)) -> pd.DataFrame:
     rows = []
     for region, region_data in data.groupby("RegionName", sort=True):
-        for period_name, years in (("validation", [2024]), ("test", [2025])):
-            period = region_data[region_data["year"].isin(years)]
-            for horizon, prediction_column in (
-                ("tomorrow_24h", "forecast_tomorrow"),
-                ("next_week_168h", "forecast_next_week"),
-            ):
-                evaluated = period.dropna(subset=[prediction_column])
-                actual = evaluated["ConsumptionkWh"]
-                forecast = evaluated[prediction_column]
-                rows.append(
-                    {
-                        "region": region,
-                        "period": period_name,
-                        "horizon": horizon,
-                        "observations": len(evaluated),
-                        "mae_kwh": (actual - forecast).abs().mean(),
-                        "rmse_kwh": ((actual - forecast) ** 2).mean() ** 0.5,
-                        "smape_pct": smape(actual, forecast),
-                    }
-                )
-    return pd.DataFrame(rows)
-
-
-def plot_test_example(data: pd.DataFrame) -> None:
-    """Display the first two weeks of 2025 for each region."""
-    test_start = pd.Timestamp("2025-01-01", tz=None)
-    test_end = test_start + pd.Timedelta(days=14)
-    example = data[(data["TimeDK"] >= test_start) & (data["TimeDK"] < test_end)]
-
-    regions = sorted(data["RegionName"].unique())
-    fig, axes = plt.subplots(len(regions), 1, figsize=(15, 3 * len(regions)), sharex=True)
-    axes = [axes] if len(regions) == 1 else axes
-    for axis, region in zip(axes, regions):
-        region_data = example[example["RegionName"] == region]
-        axis.plot(region_data["TimeDK"], region_data["ConsumptionkWh"], label="Actual", linewidth=1.5)
-        axis.plot(region_data["TimeDK"], region_data["forecast_tomorrow"], label="24-hour baseline", alpha=0.8)
-        axis.plot(region_data["TimeDK"], region_data["forecast_next_week"], label="168-hour baseline", alpha=0.8)
-        axis.set_title(region)
-        axis.set_ylabel("kWh")
-        axis.legend(loc="upper right")
-    axes[-1].set_xlabel("Danish local time")
-    fig.suptitle("Regional demand forecasts: first two weeks of 2025", fontsize=15)
-    fig.tight_layout()
-    plt.show()
+        values = region_data.sort_values("TimeUTC").reset_index(drop=True)
+        for origin, timestamp in enumerate(values["TimeUTC"]):
+            if timestamp.hour != 0 or timestamp.year not in years:
+                continue
+            for horizon in HORIZONS:
+                end = origin + horizon + 1
+                if end > len(values):
+                    continue
+                actual = float(values.loc[origin + 1: origin + horizon, "ConsumptionkWh"].sum())
+                baselines = {
+                    "previous_day": (24,),
+                    "previous_week": (168,),
+                    "four_week_mean": (168, 336, 504, 672),
+                }
+                for model, lags in baselines.items():
+                    if origin + 1 - max(lags) < 0:
+                        continue
+                    forecast = forecast_total(values["ConsumptionkWh"], origin, horizon, lags)
+                    rows.append(
+                        {
+                            "region": region,
+                            "model": model,
+                            "period": "validation" if timestamp.year == 2024 else "test",
+                            "evaluation_year": timestamp.year,
+                            "horizon_hours": horizon,
+                            "observations": 1,
+                            "mae_kwh": abs(actual - forecast),
+                            "rmse_kwh": abs(actual - forecast),
+                            "smape_pct": smape(pd.Series([actual]), pd.Series([forecast])),
+                        }
+                    )
+    detail = pd.DataFrame(rows)
+    grouped = detail.groupby(
+        ["region", "model", "period", "evaluation_year", "horizon_hours"], as_index=False
+    )
+    return grouped.agg(
+        observations=("observations", "sum"),
+        mae_kwh=("mae_kwh", "mean"),
+        rmse_kwh=("rmse_kwh", lambda values: np.sqrt(np.mean(values ** 2))),
+        smape_pct=("smape_pct", "mean"),
+    )
 
 
 def main() -> None:
-    data = add_baselines(load_regional_hourly_demand())
-    metrics = evaluate(data)
+    metrics = evaluate(load_regional_hourly_demand())
     METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
     metrics.to_csv(METRICS_PATH, index=False)
     print(metrics.to_string(index=False, float_format=lambda value: f"{value:,.2f}"))
     print(f"\nSaved metrics to {METRICS_PATH}")
-    plot_test_example(data)
 
 
 if __name__ == "__main__":

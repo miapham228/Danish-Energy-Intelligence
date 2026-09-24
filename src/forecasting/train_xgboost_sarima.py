@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FEATURE_PATH = PROJECT_ROOT / "data" / "processed" / "consumption_2021_2025_features.parquet"
 METRICS_PATH = PROJECT_ROOT / "data" / "processed" / "regional_validation_metrics.csv"
 HORIZONS = (24, 168)
+VALIDATION_YEARS = (2022, 2023, 2024)
 SERIES_KEY = "RegionName"
 
 
@@ -75,13 +76,22 @@ def make_supervised(region_data: pd.DataFrame, horizon: int) -> tuple[pd.DataFra
     return usable, usable["future_total"]
 
 
-def score(actual: pd.Series, forecast: np.ndarray, region: str, model: str, period: str, horizon: int) -> dict:
+def score(
+    actual: pd.Series,
+    forecast: np.ndarray,
+    region: str,
+    model: str,
+    period: str,
+    horizon: int,
+    evaluation_year: int | None = None,
+) -> dict:
     actual = pd.Series(actual).reset_index(drop=True)
     forecast = pd.Series(forecast).reset_index(drop=True)
     return {
         "region": region,
         "model": model,
         "period": period,
+        "evaluation_year": evaluation_year,
         "horizon_hours": horizon,
         "observations": len(actual),
         "mae_kwh": (actual - forecast).abs().mean(),
@@ -93,12 +103,13 @@ def score(actual: pd.Series, forecast: np.ndarray, region: str, model: str, peri
 def add_all_region_metrics(metrics: pd.DataFrame) -> pd.DataFrame:
     """Add pooled metrics for model selection across all regions."""
     summary_rows = []
-    for (model, period, horizon), group in metrics.groupby(
-        ["model", "period", "horizon_hours"], sort=False
-    ):
+    grouping = ["model", "period", "horizon_hours"]
+    if "evaluation_year" in metrics.columns:
+        grouping.append("evaluation_year")
+    for keys, group in metrics.groupby(grouping, sort=False, dropna=False):
+        model, period, horizon = keys[:3]
         observations = group["observations"].sum()
-        summary_rows.append(
-            {
+        row = {
                 "region": "ALL_REGIONS",
                 "model": model,
                 "period": period,
@@ -110,7 +121,9 @@ def add_all_region_metrics(metrics: pd.DataFrame) -> pd.DataFrame:
                 ),
                 "smape_pct": (group["smape_pct"] * group["observations"]).sum() / observations,
             }
-        )
+        if "evaluation_year" in metrics.columns:
+            row["evaluation_year"] = keys[3]
+        summary_rows.append(row)
     return pd.concat([metrics, pd.DataFrame(summary_rows)], ignore_index=True)
 
 
@@ -130,25 +143,30 @@ def run_xgboost(region_data: pd.DataFrame) -> tuple[list[dict], list[dict]]:
     for region, values in region_data.groupby(SERIES_KEY, sort=True):
         for horizon in HORIZONS:
             supervised, target = make_supervised(values, horizon)
-            train = supervised[supervised["target_end_year"] <= 2023]
-            validation = evaluation_origins(supervised[supervised["target_end_year"] == 2024])
             features = [column for column in supervised.columns if column.startswith(("hour", "weekday", "month", "day_of_year", "is_weekend", "lag_", "rolling_"))]
-
-            model = XGBRegressor(
-                n_estimators=500,
-                max_depth=8,
-                learning_rate=0.05,
-                subsample=0.8,
-                colsample_bytree=0.8,
-                objective="reg:squarederror",
-                eval_metric="mae",
-                tree_method="hist",
-                n_jobs=4,
-                random_state=42,
-            )
-            model.fit(train[features], target.loc[train.index])
-            prediction = model.predict(validation[features])
-            metrics.append(score(validation["future_total"], prediction, region, "xgboost", "validation", horizon))
+            for evaluation_year in VALIDATION_YEARS:
+                train = supervised[supervised["target_end_year"] <= evaluation_year - 1]
+                validation = evaluation_origins(
+                    supervised[supervised["target_end_year"] == evaluation_year]
+                )
+                model = XGBRegressor(
+                    n_estimators=500,
+                    max_depth=8,
+                    learning_rate=0.05,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    objective="reg:squarederror",
+                    eval_metric="mae",
+                    tree_method="hist",
+                    n_jobs=4,
+                    random_state=42,
+                )
+                model.fit(train[features], target.loc[train.index])
+                prediction = model.predict(validation[features])
+                metrics.append(score(
+                    validation["future_total"], prediction, region, "xgboost",
+                    "validation", horizon, evaluation_year,
+                ))
     return metrics, forecasts
 
 
@@ -166,9 +184,9 @@ def run_sarima(region_data: pd.DataFrame) -> tuple[list[dict], list[dict]]:
         hourly = hourly.interpolate(limit_direction="both")
         daily = hourly.resample("D").sum()
 
-        for cutoff, period, future_year in (
-            (pd.Timestamp("2023-12-31 23:00:00"), "validation", 2024),
-        ):
+        for future_year in VALIDATION_YEARS:
+            cutoff = pd.Timestamp(f"{future_year - 1}-12-31 23:00:00")
+            period = "validation"
             history = daily.loc[:cutoff].tail(365)
             model = SARIMAX(
                 history,
@@ -203,6 +221,7 @@ def run_sarima(region_data: pd.DataFrame) -> tuple[list[dict], list[dict]]:
                     "sarima",
                     period,
                     horizon,
+                    future_year,
                 ))
 
     return metrics, forecasts

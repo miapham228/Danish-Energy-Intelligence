@@ -70,13 +70,14 @@ Run commands from the repository root.
    python -m src.feature_engineering.build_features
    ```
 
-3. Generate seasonal-naive baseline metrics:
+3. Generate target-aligned seasonal baseline metrics:
 
    ```powershell
    python -m src.forecasting.evaluate_regional_baselines
    ```
 
-4. Train and evaluate the XGBoost/SARIMA comparison on 2024:
+4. Train and evaluate the XGBoost/SARIMA comparison using rolling yearly
+   validation folds for 2022, 2023, and 2024:
 
    ```powershell
    python -m src.forecasting.train_xgboost_sarima
@@ -87,6 +88,22 @@ Run commands from the repository root.
    ```powershell
    python -m src.forecasting.train_final_xgboost
    ```
+
+6. Generate native XGBoost feature-importance summaries:
+
+   ```powershell
+   python -m src.forecasting.explain_xgboost
+   ```
+
+7. Build the HTML forecast report with accuracy tables and actual-versus-
+   predicted plots:
+
+   ```powershell
+   python -m src.reporting.build_forecast_report
+   ```
+
+   Open `reports/forecast_report/report.html` in a browser. The report uses
+   embedded images and is portable as a single HTML file.
 
 Generated metrics and forecasts are written to `data/processed/`.
 
@@ -107,7 +124,8 @@ not require loading the large processed parquet file.
 - Features: calendar variables, cyclic calendar encodings, 1/24/168-hour
   lags, and leakage-safe 24/168-hour rolling means.
 - Target: total regional consumption over the following 24 or 168 hours.
-- Validation: training through 2023 and evaluation during 2024.
+- Validation: rolling yearly folds, each trained only on data available before
+  the evaluation year (2022, 2023, and 2024).
 - Test: training through 2024 and evaluation during 2025.
 - Metrics: MAE, RMSE, and symmetric mean absolute percentage error (sMAPE).
 
@@ -116,4 +134,5 @@ not require loading the large processed parquet file.
 - Add rolling time-series cross-validation.
 - Compare against stronger seasonal baselines.
 - Add forecast uncertainty and model monitoring.
-- Add forecast plots and feature-importance explanations.
+- Add SHAP explanations for selected forecasts when a lightweight local
+  explanation is needed.

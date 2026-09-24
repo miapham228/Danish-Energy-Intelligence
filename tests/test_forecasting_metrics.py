@@ -3,6 +3,7 @@ import pandas as pd
 
 from src.forecasting.train_xgboost_sarima import add_all_region_metrics, smape
 from src.forecasting.train_final_xgboost import summarize
+from src.forecasting.evaluate_regional_baselines import forecast_total
 
 
 def test_smape_returns_percentage():
@@ -48,3 +49,11 @@ def test_summarize_adds_regional_and_pooled_rows():
     assert set(result["region"]) == {"A", "B", "ALL_REGIONS"}
     assert pooled["observations"] == 3
     assert pooled["mae_kwh"] == 2
+
+
+def test_forecast_total_uses_only_historical_values():
+    values = pd.Series(np.arange(1000, dtype=float))
+
+    forecast = forecast_total(values, origin=700, horizon=3, lags=(7,))
+
+    assert forecast == 694 + 695 + 696
